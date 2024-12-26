@@ -1,73 +1,342 @@
 import pandas as pd
+import numpy as np
 from matplotlib import pyplot as plt
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import StandardScaler
+from itertools import product
+import warnings
+
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
-def plot_ANN(result_rows, predict_ANN):
-    plt.plot(result_rows, label='True Values')
-    plt.plot(predict_ANN, color='red', label='Predicted Values')
-    plt.title('График значений результирующего столбца и модели')
+def plot_comparison(true_values: np.ndarray, predicted_values: np.ndarray, 
+                   title: str = 'Сравнение истинных и предсказанных значений') -> None:
+    """
+    Строит график сравнения истинных и предсказанных значений.
+
+    Args:
+        true_values: Массив истинных значений
+        predicted_values: Массив предсказанных значений
+        title: Заголовок графика
+
+    Returns:
+        None
+    """
+    plt.figure(figsize=(10, 6))
+    plt.plot(true_values, label='Истинные значения')
+    plt.plot(predicted_values, color='red', label='Предсказанные значения')
+    plt.title(title)
     plt.grid()
     plt.legend()
     plt.show()
 
 
-def plot_result_rows(result_rows):
-    plt.plot(result_rows)
-    plt.title('График значений результирующего столбца')
-    plt.ylabel('Значение')
-    plt.grid()
-    plt.show()
+def load_and_prepare_data(file_path: str) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Загружает данные из Excel файла и подготавливает их для обучения модели.
+    
+    Включает:
+    - Загрузку данных
+    - Масштабирование признаков
+    - Генерацию полиномиальных признаков второго порядка
+    https://scikit-learn.ru/stable/modules/preprocessing.html
+    
+    Args:
+        file_path: Путь к Excel файлу с данными
+
+    Returns:
+        tuple: (признаки в виде DataFrame, целевые значения в виде Series)
+    """
+    data = pd.read_excel(file_path)
+    target_values = data.Type
+    feature_values = data.drop(columns=['X', 'Y', 'Fi', 'Type'])
+    
+    scaler = StandardScaler()
+    feature_values_scaled = scaler.fit_transform(feature_values)
+    
+    poly_features = []
+    for i in range(feature_values_scaled.shape[1]):
+        for j in range(i, feature_values_scaled.shape[1]):
+            poly_features.append(feature_values_scaled[:, i] * feature_values_scaled[:, j])
+    
+    poly_features = np.column_stack(poly_features)
+    
+    final_features = np.hstack([feature_values_scaled, poly_features])
+    
+    original_columns = feature_values.columns
+    poly_columns = [f'poly_{i}_{j}' for i in range(len(original_columns)) 
+                   for j in range(i, len(original_columns))]
+    
+    final_features_df = pd.DataFrame(
+        final_features,
+        columns=list(original_columns) + poly_columns
+    )
+    
+    return final_features_df, target_values
 
 
-def get_xlsx_data(file_path):
-    return pd.read_excel(file_path)
+def create_neural_network(hidden_layers: tuple[int, ...] = (10, 10, 5),
+                         activation: str = 'tanh',
+                         solver: str = 'adam',
+                         max_iter: int = 1000,
+                         random_state: int = 42) -> MLPClassifier:
+    """
+    Создает и настраивает модель нейронной сети с заданными параметрами.
+
+    Args:
+        hidden_layers: Кортеж с количеством нейронов в каждом скрытом слое
+        activation: Функция активации ('relu', 'tanh', 'logistic', 'identity')
+        solver: Метод оптимизации ('adam', 'sgd', 'lbfgs')
+        max_iter: Максимальное количество итераций
+        random_state: Seed для воспроизводимости результатов
+
+    Returns:
+        MLPClassifier: Настроенная модель нейронной сети
+    """
+    return MLPClassifier(
+        hidden_layer_sizes=hidden_layers,
+        activation=activation,
+        solver=solver,
+        max_iter=max_iter,
+        random_state=random_state,
+        early_stopping=True,
+        validation_fraction=0.15,
+        n_iter_no_change=15,
+        learning_rate='adaptive',
+        alpha=0.0001,
+        batch_size='auto',
+        learning_rate_init=0.001,
+        power_t=0.5,
+        momentum=0.9,
+        nesterovs_momentum=True,
+        tol=1e-5,
+    )
 
 
-def main():
+def search_best_parameters(X: pd.DataFrame, y: pd.Series) -> tuple[dict, dict]:
+    """
+    Выполняет поиск оптимальных гиперпараметров модели.
+
+    Перебирает различные комбинации параметров и оценивает их эффективность
+    с помощью кросс-валидации. Сохраняет результаты в CSV файл.
+
+    Args:
+        X: DataFrame с признаками
+        y: Series с целевыми значениями
+
+    Returns:
+        tuple: (лучшие параметры, метрики лучшей модели)
+    """
+    param_space = {
+        'hidden_layers': [
+            (10, 10, 5),
+            (10, 10, 10),
+            (10, 10, 15),
+            (10, 10, 20),
+            (100,),
+            (200,),
+            (300,),
+            (100, 50),
+            (200, 100),
+            (300, 150),
+            (100, 50, 25),
+            (200, 100, 50),
+            (300, 150, 75),
+            (400, 200, 100),
+            (200, 100, 50, 25),
+            (300, 150, 75, 35),
+            (400, 200, 100, 50),
+            (500, 250, 125, 60)
+        ],
+        'activation': ['relu', 'tanh', 'logistic', 'identity'],
+        'solver': ['adam', 'sgd', 'lbfgs'],
+        'max_iter': [200, 500, 1000, 2000]
+    }
+    
+    best_params = None
+    best_metrics = {
+        'f1': 0,
+        'cv_mean': 0,
+        'cv_std': float('inf')
+    }
+    
+    results = []
+    
+    param_combinations = [dict(zip(param_space.keys(), v)) 
+                         for v in product(*param_space.values())]
+    
+    total_combinations = len(param_combinations)
+    print(f"Начало поиска параметров. Всего комбинаций: {total_combinations}")
+    
+    for idx, params in enumerate(param_combinations, 1):
+        print(f"\rПроверка комбинации {idx}/{total_combinations}", end='')
+        
+        model = create_neural_network(
+            hidden_layers=params['hidden_layers'],
+            activation=params['activation'],
+            solver=params['solver'],
+            max_iter=params['max_iter']
+        )
+        
+        try:
+            cv_scores = cross_val_score(model, X, y, cv=3, scoring='f1_macro')
+            cv_mean = np.mean(cv_scores)
+            cv_std = np.std(cv_scores)
+            
+            model.fit(X, y)
+            predictions = model.predict(X)
+            
+            f1 = f1_score(y, predictions, average='macro')
+            accuracy = accuracy_score(y, predictions)
+            
+            result = {
+                'hidden_layers': str(params['hidden_layers']),
+                'activation': params['activation'],
+                'solver': params['solver'],
+                'max_iter': params['max_iter'],
+                
+                'accuracy': accuracy,
+                'f1_score': f1,
+                
+                'cv_mean': cv_mean,
+                'cv_std': cv_std,
+                'cv_fold_1': cv_scores[0],
+                'cv_fold_2': cv_scores[1],
+                'cv_fold_3': cv_scores[2],
+                
+                'validation_fraction': model.validation_fraction,
+                'n_iter_no_change': model.n_iter_no_change,
+                'learning_rate': model.learning_rate,
+                'alpha': model.alpha,
+                'batch_size': str(model.batch_size),
+                'learning_rate_init': model.learning_rate_init,
+                'momentum': model.momentum,
+                'nesterovs_momentum': model.nesterovs_momentum,
+                'early_stopping': model.early_stopping,
+                'tol': model.tol,
+                
+                'n_iter_': model.n_iter_,
+                'n_layers_': model.n_layers_,
+                'n_outputs_': model.n_outputs_,
+                
+                'timestamp': pd.Timestamp.now()
+            }
+            
+            results.append(result)
+            
+            if (cv_mean > best_metrics['cv_mean'] and cv_std < 0.1) or \
+               (cv_mean >= best_metrics['cv_mean'] - 0.01 and cv_std < best_metrics['cv_std']):
+                best_params = params
+                best_metrics = {
+                    'f1': f1,
+                    'cv_mean': cv_mean,
+                    'cv_std': cv_std
+                }
+                
+        except Exception as e:
+            print(f"\nОшибка при проверке параметров: {params}")
+            print(f"Ошибка: {str(e)}")
+            continue
+    
+    results_df = pd.DataFrame(results)
+    
+    results_df = results_df.sort_values('f1_score', ascending=False)
+    
+    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'parameter_search_results_{timestamp}.csv'
+    results_df.to_csv(filename, index=False)
+    
+    print(f"\nРезультаты сохранены в файл: {filename}")
+    
+    print("\nТоп-5 лучших конфигураций:")
+    top_5 = results_df.head()
+    for _, row in top_5.iterrows():
+        print(f"\nКонфигурация:")
+        print(f"hidden_layers: {row['hidden_layers']}")
+        print(f"activation: {row['activation']}")
+        print(f"solver: {row['solver']}")
+        print(f"max_iter: {row['max_iter']}")
+        print(f"F1-мера: {row['f1_score']:.4f}")
+        print(f"Точность: {row['accuracy']:.4f}")
+        print(f"Средняя CV: {row['cv_mean']:.4f}")
+        print(f"Стд. откл. CV: {row['cv_std']:.4f}")
+    
+    return best_params, best_metrics
+
+
+def evaluate_model(model: MLPClassifier, X: pd.DataFrame, y: pd.Series) -> np.ndarray:
+    """
+    Оценивает качество модели по нескольким метрикам.
+
+    Вычисляет и выводит:
+    - Точность модели
+    - F1-меру
+    - Результаты кросс-валидации
+
+    Args:
+        model: Обученная модель нейронной сети
+        X: DataFrame с признаками
+        y: Series с целевыми значениями
+
+    Returns:
+        np.ndarray: Массив предсказанных значений
+    """
+    predictions = model.predict(X)
+    
+    accuracy = accuracy_score(y, predictions)
+    f1 = f1_score(y, predictions, average='macro')
+    cross_val_scores = cross_val_score(model, X, y, cv=3, scoring='f1_macro')
+    
+    print(f"\nИтоговые метрики модели:")
+    print(f"Точность модели: {round(accuracy * 100)}%")
+    print(f"F1-мера: {round(f1 * 100)}%")
+    print("\nРезультаты кросс-валидации:")
+    for idx, score in enumerate(cross_val_scores, 1):
+        print(f"Фолд {idx}: {round(score * 100)}%")
+    
+    return predictions
+
+
+def main() -> None:
+    """
+    Основная функция программы.
+    
+    Выполняет полный цикл работы с моделью:
+    - Загрузка и подготовка данных
+    - Создание и обучение модели
+    - Оценка качества модели
+    - Визуализация результатов
+    """
+    # Загрузка и подготовка данных
+    # file_path = 'datasets/Data_Set_(A+B)_orig.xlsx'
+    # file_path = 'datasets/Data_Set_(A+B)_sorted.xlsx'
     file_path = 'datasets/Data_Set_(A+B).xlsx'
-    data = get_xlsx_data(file_path)
-    result_rows = data.Type
-    input_rows = data.drop(columns=['X', 'Y', 'Fi', 'Type'])
+    # file_path = 'datasets/Data_Set_C.xlsx'
+    X, y = load_and_prepare_data(file_path)
+    
+    # # Поиск оптимальных параметров
+    # best_params, _ = search_best_parameters(X, y)
+    
+    # # Создание и обучение финальной модели
+    # model = create_neural_network(
+    #     hidden_layers=best_params['hidden_layers'],
+    #     activation=best_params['activation'],
+    #     solver=best_params['solver'],
+    #     max_iter=best_params['max_iter']
+    # )
 
-    hidden_layer_size_param_first = 10
-    hidden_layer_size_param_second = 10
-    hidden_layer_size_param_third = 5
-
-    activation_method = 'tanh'
-
-    example_activation = {'identity', 'logistic', 'tanh', 'relu'}
-
-    solver_method = 'adam'
-
-    example_solver = {'lbfgs', 'sgd', 'adam'}
-
-    _max_iter = 200
-
-    _random_state = 42
-
-    ANN = MLPClassifier(hidden_layer_sizes=(hidden_layer_size_param_first, hidden_layer_size_param_second,
-                                            hidden_layer_size_param_third), activation=activation_method,
-                        solver=solver_method, max_iter=_max_iter, random_state=_random_state)
-
-    ANN.fit(input_rows, result_rows)
-    predict_ANN = ANN.predict(input_rows)
-
-    # plot_ANN(result_rows, predict_ANN)
-
-    accuracy_data = accuracy_score(result_rows, predict_ANN)
-    print(f"Процент угадываний: {round(accuracy_data * 100)}%")
-
-    f1_data = f1_score(result_rows, predict_ANN)
-    print(f"f1_score: {round(f1_data * 100)}%")
-
-
-    data_cross_val_scores = cross_val_score(ANN, input_rows, result_rows, cv=3)
-    for index, value in enumerate(data_cross_val_scores):
-        print(f"Перекрестный критерий ошибки {index + 1}: {round(value * 100)}%")
-
+    model = create_neural_network(
+        hidden_layers = (500, 250, 125, 60),
+        activation='identity',
+        solver='lbfgs',
+        max_iter=200
+    )
+    model.fit(X, y)
+    
+    predictions = evaluate_model(model, X, y)
+    plot_comparison(y, predictions)
 
 
 if __name__ == '__main__':
